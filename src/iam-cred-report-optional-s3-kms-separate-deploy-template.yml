@@ -1,0 +1,205 @@
+####################################################################
+##  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+##  SPDX-License-Identifier: MIT-0
+####################################################################
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  This template is used to optionally deploy the S3 Bucket and optional
+  KMS key into a separate log/security account to isolate the data
+  from the payer account. (qs-1tius4lea)
+
+  This needs to be run before the "core" template is run so that the 
+  S3 bucket name and optional KMS key ARN can be provided to the
+  core template as "Existing" resources.
+
+  Following the "core" template run, grants to the S3 bucket and optional
+  KMS key against the Lambda execution role will need to manually occur.
+
+  This template will deploy the following resources:
+    S3 Bucket
+    KMS Key (Optional)
+
+
+    
+###############################################################################
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: IAM Credential Report Storage
+        Parameters:
+          - pS3BucketTargetName
+          - pKMSKeyStatus
+          - pKMSKeyArn
+
+    ParameterLabels:
+      pS3BucketTargetName:
+        default: The name of the S3 Bucket
+      pKMSKeyStatus:
+        default: Status of the KMS key to protect the S3 Bucket (New/Existing/None)
+      pKMSKeyArn:
+        default: The ARN of the KMS key if using an existing one or None if not using one
+      pTagKey1:
+        default: A Tag key to associate with all of the resources
+      pTagValue1:
+        default: A Tag value for the Tag key
+
+
+
+###############################################################################
+Parameters:
+  ##  The name of the s3 bucket to create
+  pS3BucketTargetName:
+    Type: String
+    Description: The name of the S3 bucket to store the Credential Reports.
+
+
+  ##  The status on the KMS key. If there is an existing bucket secured with a KMS key, we need to have grants placed on the key.
+  ##  This should be the Key used on the S3 bucket. If the bucket and key are in another account, grants will need to occur in that account
+  ##  outside of this template.
+  ##  It is possible to leave this off (none) and default to S3 AES256 encryption for the S3 bucket
+  pKMSKeyStatus:
+    Type: String
+    Description: Create a new KMS key in payer account, use an existing KMS key (payer or other account), or do not use KMS key.
+    AllowedValues:
+      - New
+      - Existing
+      - None
+    Default: None
+
+
+  ## This is the ARN of an existing KMS key
+  pKMSKeyArn:
+    Type: String
+    Description: The ARN of the KMS Key if creating a new KMS Key, using an existing one, or "None" if not using KMS.
+    Default: None
+
+
+  ##  Tag key and value
+  pTagKey1:
+    Type: String
+    Description: Tag key
+    Default: managed-by
+  pTagValue1:
+    Type: String
+    Description: Tag key value
+    Default: credential-cfn
+
+
+
+###############################################################################
+Conditions:
+  ## This is to get the status of the KMS key, does one exist already, does the user want to create one, or don't use any
+  CreateKMSKey: !Equals
+    - !Ref pKMSKeyStatus
+    - New
+
+  UseExistingKMSKey: !Equals
+    - !Ref pKMSKeyStatus
+    - Existing
+
+  ## This is to see if we use s3 or KMS encryption
+  ##  Granting KMSKey means we are creating an S3 bucket and an alias was not provided
+  UseKMS: !Or
+    - !Condition CreateKMSKey
+    - !Condition UseExistingKMSKey
+ 
+  UseS3AES256: !Equals
+    - !Ref pKMSKeyStatus
+    - None
+
+
+
+###############################################################################
+Resources:
+
+  ## This is for a KMS key if we are creating a new key and s3 bucket
+  ## the rule should prevent us from creating a key if we are not creating a
+  ## bucket.
+  rKMSKey:
+    Type: AWS::KMS::Key
+    Condition: CreateKMSKey
+    Properties:
+      Description: KMS Key to secure S3 bucket used to store IAM Credential Reports
+      EnableKeyRotation: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow Administation of Key"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Grant access to KMS Key functions"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKeyWithoutPlaintext"
+            Resource: "*"
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+    
+
+  ## This is to create a S3 Bucket and set the
+  ## KMS key to the default encryption
+  rS3BucketWithKMS:
+    Type: AWS::S3::Bucket
+    Condition: UseKMS
+    Properties:
+      BucketName: !Ref pS3BucketTargetName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: 'aws:kms'
+            KMSMasterKeyID: !If [CreateKMSKey, !GetAtt rKMSKey.Arn, !Ref pKMSKeyArn]
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## This is to create a S3 Bucket and set the
+  ## S3 encryption as the default
+  rS3BucketWithOutKMS:
+    Type: AWS::S3::Bucket
+    Condition: UseS3AES256
+    Properties:
+      BucketName: !Ref pS3BucketTargetName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+###############################################################################
+Outputs:
+  oS3BucketTargetName:
+    Value: !Ref pS3BucketTargetName
+    Description: The bucket name where the IAM Credential Reports will be stored. This needs to be provided to the "core" template input. Then after the "core" template completes, grant S3:PutObject in the bucket policy to the Lambda Execution role.
+  oMSKeyARN:
+    Condition: UseKMS
+    Value: !If [CreateKMSKey, !GetAtt rKMSKey.Arn, !Ref pKMSKeyArn ]
+    Description: The ARN of the KMS key used to secure the S3 Bucket. This needs to be provided to the "core" template input. Then after the "core" template completes, grant kms:DescribeKey, kms:Encrypt, kms:Decrypt, kms:ReEncrypt*, kms:GenerateDataKey, and kms:GenerateDataKeyWithoutPlaintext in the KMS Key policy  to the Lambda Execution role.

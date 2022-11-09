@@ -1,0 +1,16 @@
+####################################################################
+##  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+##  SPDX-License-Identifier: MIT-0
+####################################################################
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "iam-cred-report-optional-s3-kms-deployment"
+s3_prefix = "iam-cred-report-optional-s3-kms-deployment"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "pKMSKeyStatus=\"New\" pKMSKeyArn=\"None\" pTagKey1=\"tag-key\" pTagValue1=\"tag-value\""
+image_repositories = []
+confirm_changeset = true
+disable_rollback = true

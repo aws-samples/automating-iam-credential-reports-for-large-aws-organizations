@@ -1,0 +1,696 @@
+####################################################################
+##  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+##  SPDX-License-Identifier: MIT-0
+####################################################################
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  This template is used to deploy the core components of the
+  IAM Credential Report Generation tool in the payer account. (qs-1tius4lea)
+
+  Another CloudFormation StackSet template will deploy the
+  iam-credential-report-lambda-gen-report-execution-role to
+  all of the organization's member accounts.
+
+  This template will deploy the following resources in the payer
+  account:
+    2 Lambda Functions
+    Step Functions
+    EventBridge Rule
+    SNS Topic
+    IAM Roles
+    StackSet with Role
+    CloudWatch Log Group
+
+  Optionally, it will create the following or make use of existing resources:
+    S3 Bucket
+    KMS Key
+
+
+    
+###############################################################################
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: IAM Credential Report Storage
+        Parameters:
+          - pS3BucketStatus
+          - pS3BucketTargetName
+          - pKMSKeyStatus
+          - pKMSKeyArn
+      - Label:
+          default: IAM Credential Report Generation
+        Parameters:
+          - pSNSSubEmail
+          - pIAMCredentialGenRoleName
+          - pOrganizationRootId
+          - pOrganizationId
+          - pLogsRetentionInDays
+          - pEventBridgeTriggerHour
+          - pTagKey1
+          - pTagValue1
+
+    ParameterLabels:
+      pS3BucketStatus:
+        default: Status of the S3 Bucket to store the output (New/Existing)
+      pS3BucketTargetName:
+        default: The name of the S3 Bucket
+      pKMSKeyStatus:
+        default: Status of the KMS key to protect the S3 Bucket (New/Existing/None)
+      pKMSKeyArn:
+        default: The ARN of the KMS key if using an existing one or None if not using one
+      pSNSSubEmail:
+        default: Email address to subscribe to the SNS topic that reports generation errors or None if no subscriptions is desired
+      pOrganizationRootId:
+        default: The ID of the Root of the Organization (r-xxxx)
+      pOrganizationId:
+        default: The ID of the Organization (o-xxxxxxxxxx)
+      pLogsRetentionInDays:
+        default: The number of day to retain the CloudWatch logs for the Step Functions
+      pEventBridgeTriggerHour:
+        default: The UTC hour of the day to trigger the start of the report generation
+      pTagKey1:
+        default: A Tag key to associate with all of the resources
+      pTagValue1:
+        default: A Tag value for the Tag key
+
+
+
+###############################################################################
+Parameters:
+  ##  We want to know if the user wants to create an s3 bucket in the payer account or use an existing bucket.
+  ##  IF an existing bucket is used and it is in a different account, the report gen lambda will need to have
+  ##  permission granted outside of this template
+  pS3BucketStatus:
+    Type: String
+    Description: Create a new S3 bucket in payer account or use an existing bucket (payer or other account).
+    AllowedValues:
+      - New
+      - Existing
+    Default: Existing
+
+
+  ##  The name of the s3 bucket, new or existing
+  pS3BucketTargetName:
+    Type: String
+    Description: The name of the S3 bucket to store the Credential Reports. This can be the name of an existing bucket or the name to create.
+
+
+  ##  The status on the KMS key. If there is an existing bucket secured with a KMS key, we need to have grants placed on the key.
+  ##  This should be the Key used on the S3 bucket. If the bucket and key are in another account, grants will need to occur in that account
+  ##  outside of this template.
+  ##  It is possible to leave this off (none) and default to S3 AES256 encryption for the S3 bucket
+  pKMSKeyStatus:
+    Type: String
+    Description: Create a new KMS key in payer account, use an existing KMS key (payer or other account), or do not use KMS key.
+    AllowedValues:
+      - New
+      - Existing
+      - None
+    Default: None
+
+
+  ## This is the ARN of an existing KMS key
+  pKMSKeyArn:
+    Type: String
+    Description: The ARN of the KMS Key if creating a new KMS Key, using an existing one, or "None" if not using KMS.
+    Default: None
+
+
+  ## This is an email address to subscribe to the sns topic for error notifications
+  pSNSSubEmail:
+    Type: String
+    Description: An email address for IAM Credential Report generation failure notifications or "None" if you do not want an email subscription.
+    Default: None
+
+
+  ## We need a fixed name to assume and grant across the accounts for the lambda function that generates the reports
+  pIAMCredentialGenRoleName:
+    Type: String
+    Description: The name of the role to create in all the member accounts used to generate the IAM Credential Reports.
+    Default: iam-credential-report-generation-role
+
+
+  ## The root id of the organization, needed for the StackSet deployment
+  pOrganizationRootId:
+    Type: String
+    Description: The Root ID of the Organization (r-xxxx).
+#    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+
+  ## The organization id, needed to limit the scope of the assume role permission
+  pOrganizationId:
+    Type: String
+    Description: The Organization ID of the Payer Account (o-xxxxxxxxxx).
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+
+  ## The retention days for the CloudWatch logs group
+  pLogsRetentionInDays:
+    Description: Specifies the number of days you want to retain log events in the CloudWatch log group
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+
+  ## The hour of the day (UTC) to trigger the data collection
+  pEventBridgeTriggerHour:
+    Description: Specifies the UTC hour of the day to trigger the IAM Credential Reports to run.
+    Type: Number
+    MinValue: 0
+    MaxValue: 23
+    Default: 2
+
+
+  ##  Tag key and value
+  pTagKey1:
+    Type: String
+    Description: Tag key
+    Default: managed-by
+  pTagValue1:
+    Type: String
+    Description: Tag key value
+    Default: credential-cfn
+
+
+
+###############################################################################
+Rules:
+  ## We can only create a new KMS key if we are creating a new S3 bucket
+  ## otherwise we have a lot of validation to confirm the bucket is in the 
+  ## main payer account and not another account.
+  CreateKMSOnlyWhenCreateS3:
+    RuleCondition: !Equals
+      - !Ref pKMSKeyStatus
+      - New
+    Assertions:
+      - Assert: !Equals
+          - !Ref pS3BucketStatus
+          - New
+        AssertDescription: Cannot request a new KMS key when using an existing S3 bucket.
+
+  
+
+###############################################################################
+Conditions:
+  ## This is to get the status of the KMS key, does one exist already, does the user want to create one, or don't use any
+  CreateKMSKey: !Equals
+    - !Ref pKMSKeyStatus
+    - New
+
+  UseExistingKMSKey: !Equals
+    - !Ref pKMSKeyStatus
+    - Existing
+
+  GrantToKMSKey: !Or
+    - !Condition CreateKMSKey
+    - !Condition UseExistingKMSKey
+ 
+  NoKMSKeyGrant: !Not
+    - !Or
+      - !Condition CreateKMSKey
+      - !Condition UseExistingKMSKey
+ 
+
+  ## This is to see if we use s3 or KMS encryption
+  ##  Granting KMS Key means we are creating an S3 bucket and an alias was not provided
+  UseS3AES256: !Equals
+    - !Ref pKMSKeyStatus
+    - None
+
+  ## This is set to true when we need to create a new S3 bucket in the payer account.
+  CreateS3Bucket: !Equals
+    - !Ref pS3BucketStatus
+    - New
+
+  ## We need to create a bucket, and there is a KMS key provided
+  CreateS3BucketWithKMS: !And
+    - !Condition CreateS3Bucket
+    - !Condition GrantToKMSKey
+
+  ## We need to create a bucket, but no KMS key
+  CreateS3BucketWithAES256: !And
+    - !Condition CreateS3Bucket
+    - !Condition UseS3AES256
+
+
+  ## There was an email provided, so subscribe to the SNS topic
+  CreateSNSSubscription: !Not
+    - !Equals
+      - !Ref pSNSSubEmail
+      - None
+
+
+###############################################################################
+Resources:
+
+  ## This is for a KMS key if we are creating a new key and s3 bucket
+  ## the rule should prevent us from creating a key if we are not creating a
+  ## bucket.
+  rKMSKey:
+    Type: AWS::KMS::Key
+    Condition: CreateKMSKey
+    Properties:
+      Description: KMS Key to secure S3 bucket used to store IAM Credential Reports
+      EnableKeyRotation: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow Administration of Key"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Grant access to KMS Key functions"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKeyWithoutPlaintext"
+            Resource: "*"
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+    
+
+  ## This is to create a S3 Bucket and set the
+  ## KMS key to the default encryption
+  rS3BucketWithKMS:
+    Type: AWS::S3::Bucket
+    Condition: CreateS3BucketWithKMS
+    Properties:
+      BucketName: !Ref pS3BucketTargetName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: 'aws:kms'
+            KMSMasterKeyID: !If [CreateKMSKey, !GetAtt rKMSKey.Arn, !Ref pKMSKeyArn]
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## This is to create a S3 Bucket and set the
+  ## S3 encryption as the default
+  rS3BucketWithOutKMS:
+    Type: AWS::S3::Bucket
+    Condition: CreateS3BucketWithAES256
+    Properties:
+      BucketName: !Ref pS3BucketTargetName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## A CloudWatch group for the State Machine
+  rCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref pLogsRetentionInDays
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## Create the SNS topic for the lambda function to report
+  ## errors in generating the IAM Credential Report for an account
+  rSNSTopicReportGenErrors:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: IAM Credential Report Generation Errors
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## Create a subscription if an email address was provided
+  rSNSTopicReportGenErrorsSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: CreateSNSSubscription
+    Properties:
+      TopicArn: !Ref rSNSTopicReportGenErrors
+      Endpoint: !Ref pSNSSubEmail
+      Protocol: email
+
+
+
+  ## This lambda function will generate a list of account ids to process
+  rLambdaFunctionIAMCredentailReportGenAccountList:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda-handlers/iam-credential-report-gen-account-list.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Lambda function to return a list of all active accounts in an organization
+      Policies:
+        - Statement:
+          - Sid: AllowOrg
+            Effect: Allow
+            Action:
+              - "organizations:Describe*"
+              - "organizations:List*"
+            Resource: "*"
+
+
+
+  ## This lambda function will generate the actual IAM Credential Report
+  ## It needs to assume roles in all the member accounts to be able to generate
+  ## the report and store it in the S3 bucket.
+  ## Because we need extra permissions for a kms key, we conditionally
+  ## create the function with that additional permissions
+  rLambdaFunctionIAMCredentailReportGenReportWithKMS:
+    Type: AWS::Serverless::Function
+    Condition: GrantToKMSKey
+    Properties:
+      Handler: lambda-handlers/iam-credential-report-gen-report.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Environment:
+        Variables:
+          MAX_LOOP: 45
+          BUCKET_ARN: !Sub 'arn:aws:s3:::${pS3BucketTargetName}'
+          ASSUME_ROLE_NAME: !Ref pIAMCredentialGenRoleName
+      Description: Lambda function to generate the IAM Credential Report and store the output in S3
+      Policies:
+        - Statement:
+          - Sid: AllowIAMCredReport
+            Effect: Allow
+            Action:
+              - "iam:GenerateCredentialReport"
+              - "iam:GetCredentialReport"
+            Resource: "*"
+        - Statement:
+          - Sid: AllowS3Put
+            Effect: Allow
+            Action:
+              - "s3:PutObject"
+            Resource: !Sub 'arn:aws:s3:::${pS3BucketTargetName}/*'
+        - Statement:
+          - Sid: AllowAssumeRole
+            Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Resource: !Sub 'arn:aws:iam::*:role/${pIAMCredentialGenRoleName}'
+            Condition:
+              StringEquals:
+                "aws:PrincipalOrgID" : !Ref pOrganizationId
+        - Statement:
+          - Sid: AllowKMS
+            Effect: Allow
+            Action:
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKeyWithoutPlaintext"
+            Resource: !If [CreateKMSKey, !GetAtt rKMSKey.Arn, !Ref pKMSKeyArn]
+
+
+
+  ## This lambda function will generate the actual IAM Credential Report
+  ## It needs to assume roles in all the member accounts to be able to generate
+  ## the report and store it in the S3 bucket.
+  ## This declaration has no KMS permission because if it is an existing
+  ## key, or no key, that grant must take 
+  ## create the function with that additional permissions
+  rLambdaFunctionIAMCredentailReportGenReportWithOutKMS:
+    Type: AWS::Serverless::Function
+    Condition: NoKMSKeyGrant
+    Properties:
+      Handler: lambda-handlers/iam-credential-report-gen-report.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Environment:
+        Variables:
+          MAX_LOOP: 45
+          BUCKET_ARN: !Sub 'arn:aws:s3:::${pS3BucketTargetName}'
+          ASSUME_ROLE_NAME: !Ref pIAMCredentialGenRoleName
+      Description: Lambda function to generate the IAM Credential Report and store the output in S3
+      Policies:
+        - Statement:
+          - Sid: AllowIAMCredReport
+            Effect: Allow
+            Action:
+              - "iam:GenerateCredentialReport"
+              - "iam:GetCredentialReport"
+            Resource: "*"
+        - Statement:
+          - Sid: AllowS3Put
+            Effect: Allow
+            Action:
+              - "s3:PutObject"
+            Resource: !Sub 'arn:aws:s3:::${pS3BucketTargetName}/*'
+        - Statement:
+          - Sid: AllowAssumeRole
+            Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Resource: !Sub 'arn:aws:iam::*:role/${pIAMCredentialGenRoleName}'
+            Condition:
+              StringEquals:
+                "aws:PrincipalOrgID" : !Ref pOrganizationId
+
+
+
+  ## The state machine will handle the coordination of the lambda functions and
+  ## loop through the async process of IAM Credential Report generation
+  rStateMachineIAMCredentailReport:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/iam-credential-report-state-machine.json
+      DefinitionSubstitutions:
+        LambdaAccountGenFunction: !GetAtt rLambdaFunctionIAMCredentailReportGenAccountList.Arn
+        LambdaReportGenFunction: !If [GrantToKMSKey, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithKMS.Arn, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithOutKMS.Arn ]
+        SNSTopicReportGenErrors: !Ref rSNSTopicReportGenErrors
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt rCloudWatchLogGroup.Arn
+        Level: ERROR
+        IncludeExecutionData: true
+      Policies:
+        - Statement:
+          - Sid: AllowLambdaExecGenAccountList
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${rLambdaFunctionIAMCredentailReportGenAccountList}:*'
+        - Statement:
+          - Sid: AllowLambdaExecGenReport
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            ## We have to map to the correct definition
+            Resource: !If [GrantToKMSKey, !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${rLambdaFunctionIAMCredentailReportGenReportWithKMS}:*', !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${rLambdaFunctionIAMCredentailReportGenReportWithOutKMS}:*' ]
+        - Statement:
+          - Sid: AllowSNSPublish
+            Effect: Allow
+            Action: 
+              - sns:Publish
+            Resource: !Ref rSNSTopicReportGenErrors
+        - Statement:
+          - Sid: AllowCloudWatch
+            Effect: Allow
+            Action: 
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+            #Resource: !GetAtt rCloudWatchLogGroup.Arn
+
+
+  ## This IAM Role is needed for the EventBridge rule to trigger the state machine
+  rEventBridgeRuleIAMRole:
+    Type: AWS::IAM::Role
+    Description: Role for EventBridge Rule to invoke IAM Credential Report State Machine
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AllowStateFunctionExecution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowStateFunctionExecution
+                Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !GetAtt rStateMachineIAMCredentailReport.Arn
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+
+
+
+  ## The event bridge rule will trigger the state machine daily at a specific hour
+  rEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: IAM Credential Report State Function Daily Trigger Rule.
+      ScheduleExpression: !Sub 'cron(0 ${pEventBridgeTriggerHour} * * ? *)'
+      Targets:
+        - Arn: !GetAtt rStateMachineIAMCredentailReport.Arn
+          Id: IamCred01
+          RoleArn: !GetAtt rEventBridgeRuleIAMRole.Arn
+
+
+  ## This stack set will create the IAM role in all the member accounts that the lambda function
+  ## will assume
+  rIAMCredentialReportGenStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      Description: StackSet to deploy IAM Credential Report Generation Role to all Member accounts
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      PermissionModel: SERVICE_MANAGED
+      StackSetName: IAMCredentialReportGenerationRoleStackSet
+      Parameters:
+        - ParameterKey: pIAMCredentialGenRoleName
+          ParameterValue: !Ref pIAMCredentialGenRoleName
+        - ParameterKey: pLambdaFunctionIAMCredentailReportGenReportRole
+          ParameterValue: !If [GrantToKMSKey, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithKMSRole.Arn, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithOutKMSRole.Arn ]
+        - ParameterKey: pTagKey1
+          ParameterValue: !Ref pTagKey1
+        - ParameterKey: pTagValue1
+          ParameterValue: !Ref pTagValue1
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds:
+              - !Ref pOrganizationRootId
+          Regions:
+            - us-east-1
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+      TemplateBody: |
+        {
+          "AWSTemplateFormatVersion": "2010-09-09",
+          "Parameters" : {
+            "pIAMCredentialGenRoleName" : {
+              "Type" : "String"
+            },
+            "pLambdaFunctionIAMCredentailReportGenReportRole" : {
+              "Type" : "String"
+            },
+            "pTagKey1" : {
+              "Type" : "String"
+            },
+            "pTagValue1" : {
+              "Type" : "String"
+            }
+          },
+          "Resources": {
+             "rIAMCredentialReportRole" : {
+                "Type" : "AWS::IAM::Role",
+                "Properties" : {
+                  "RoleName" : {"Ref" : "pIAMCredentialGenRoleName"},
+                  "AssumeRolePolicyDocument" : {
+                    "Version" : "2012-10-17",
+                    "Statement": [
+                      {
+                        "Effect": "Allow",
+                        "Principal": {
+                          "AWS" : { "Ref" : "pLambdaFunctionIAMCredentailReportGenReportRole"}
+                        },
+                        "Action": ["sts:AssumeRole" ]
+                      }
+                    ]
+                  },
+                  "Path": "/",
+                  "Policies": [
+                    {
+                      "PolicyName": "IAMCredentialReportRolePolicy",
+                      "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                          {
+                            "Effect": "Allow",
+                            "Action": [
+                              "iam:GenerateCredentialReport",
+                              "iam:GetCredentialReport"
+                            ],
+                            "Resource": "*"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "Tags" : [
+                    {
+                      "Key" : { "Ref" : "pTagKey1" },
+                      "Value" : { "Ref" : "pTagValue1" }
+                    }
+                  ]
+                }
+              }
+           }
+        }
+        
+
+
+###############################################################################
+Outputs:
+  oS3BucketTargetName:
+    Value: !Ref pS3BucketTargetName
+    Description: The bucket name where the IAM Credential Reports will be stored.
+    Export:
+      Name: !Join [ ":", [ !Ref "AWS::StackName", "pS3BucketTargetName" ]]
+  oIAMLambdaGenReportExecutionIAMRoleArn:
+    Value: !If [GrantToKMSKey, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithKMSRole.Arn, !GetAtt rLambdaFunctionIAMCredentailReportGenReportWithOutKMSRole.Arn ]
+    Description: If the S3 bucket resides in a different account, grant S3:PutObject to this roll in the bucket policy. If KMS is used in a different account, grant kms:DescribeKey, kms:Encrypt, kms:Decrypt, kms:ReEncrypt*, kms:GenerateDataKey, and kms:GenerateDataKeyWithoutPlaintext to this role in the KMS policy.
+    Export:
+      Name: !Join [ ":", [ !Ref "AWS::StackName", "rLambdaFunctionIAMCredentailReportGenReportRoleArn" ]]
