@@ -27,6 +27,7 @@ import time
 import logging
 import sys
 import botocore
+import tempfile
 
 from datetime import date
 
@@ -65,6 +66,29 @@ bucketName = BUCKET_ARN.split(":", -1)[-1]
 bucketConnection = s3.Bucket(bucketName)
     
 stsClient = boto3.client('sts')
+
+###############################################################################
+## Function to handle the temp file and S3 bucket upload
+def write_to_temp_and_upload(filename,content):
+    tmpdir = tempfile.mkdtemp()
+
+    full_path = os.path.join(tmpdir, filename)
+    #print(full_path)
+    try:
+        with open(full_path, "w") as tmp:
+            tmp.write(content)
+    except IOError as e:
+        print('IOError: Unable to write IAM Credential Report to Temp File.')
+    finally:
+        s3.Object(bucketName, today+"/"+filename).put(Body=open(full_path, 'rb'))
+        ## to avoid the lambda tmp space from filling, remove the file we created
+        os.remove(full_path)
+        ## this is used to remove the empty directory. 
+        ## OSError will be raised if the specified path is not an empty directory.
+        os.rmdir(tmpdir)
+        
+
+
 
 ###############################################################################
 ## main
@@ -163,13 +187,10 @@ def lambda_handler(event, context):
         decodedCredentialReport = credentialReport['Content'].decode("utf-8")
         ## Save credential Report into CSV file
         funcStatus['reportFileName'] = f"credentialReport_{funcStatus['accountId']}.csv"
-        with open("/tmp/"+ funcStatus['reportFileName'], "w") as file:
-            file.write(decodedCredentialReport)
-        s3.Object(bucketName, today+"/"+funcStatus['reportFileName']).put(Body=open("/tmp/"+ funcStatus['reportFileName'], 'rb'))
-
-        ## to avoid the lambda tmp space from filling, remove the file we created
-        os.remove("/tmp/"+ funcStatus['reportFileName'])
-
+        
+        # Write report to a temp file and upload to S3
+        write_to_temp_and_upload(funcStatus['reportFileName'],decodedCredentialReport)
+     
         ## everything should be done by this point
         funcStatus['LoopAgain'] = "no"
         funcStatus['funcState'] = "complete"        
