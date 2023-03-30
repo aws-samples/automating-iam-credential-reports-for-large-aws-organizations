@@ -96,6 +96,7 @@ Parameters:
   pS3BucketTargetName:
     Type: String
     Description: The name of the S3 bucket to store the Credential Reports. This can be the name of an existing bucket or the name to create.
+    AllowedPattern: ".+"
 
 
   ##  The status on the KMS key. If there is an existing bucket secured with a KMS key, we need to have grants placed on the key.
