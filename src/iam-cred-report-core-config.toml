@@ -12,5 +12,5 @@ region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_NAMED_IAM"
 disable_rollback = true
-parameter_overrides = "pS3BucketStatus=\"New\" pKMSKeyStatus=\"New\" pKMSKeyArn=\"None\" pIAMCredentialGenRoleName=\"iam-credential-report-generation-role\" pOrganizationRootId=\"r-xxxx\" pOrganizationId=\"o-xxxxxxxxxx\" pLogsRetentionInDays=\"90\" pEventBridgeTriggerHour=\"08\" pTagKey1=\"tag-key\" pTagValue1=\"tag-value\""
+parameter_overrides = "pS3BucketStatus=\"New\" pKMSKeyStatus=\"New\" pKMSKeyArn=\"None\" pIAMCredentialGenRoleName=\"iam-credential-report-generation-role\" pLogsRetentionInDays=\"90\" pEventBridgeTriggerHour=\"08\" pTagKey1=\"tag-key\" pTagValue1=\"tag-value\""
 image_repositories = []
