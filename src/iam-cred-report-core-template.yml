@@ -262,6 +262,7 @@ Resources:
         ZipFile: |
           import boto3
           import cfnresponse
+          import logging
 
           def handler(event, context):
               try:
@@ -272,7 +273,8 @@ Resources:
                 responseData['RootID'] = root_id_value
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
 
-              except Exception:
+              except Exception as ex:
+                logging.warning(repr(ex))
                 cfnresponse.send(event, context, cfnresponse.FAILED, {}, "CustomResourcePhysicalID")
 
       Handler: index.handler
