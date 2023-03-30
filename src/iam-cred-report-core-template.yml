@@ -45,8 +45,8 @@ Metadata:
         Parameters:
           - pSNSSubEmail
           - pIAMCredentialGenRoleName
-          - pOrganizationRootId
-          - pOrganizationId
+#           - pOrganizationRootId
+#           - pOrganizationId
           - pLogsRetentionInDays
           - pEventBridgeTriggerHour
           - pTagKey1
@@ -63,10 +63,10 @@ Metadata:
         default: The ARN of the KMS key if using an existing one or None if not using one
       pSNSSubEmail:
         default: Email address to subscribe to the SNS topic that reports generation errors or None if no subscriptions is desired
-      pOrganizationRootId:
-        default: The ID of the Root of the Organization (r-xxxx)
-      pOrganizationId:
-        default: The ID of the Organization (o-xxxxxxxxxx)
+#       pOrganizationRootId:
+#         default: The ID of the Root of the Organization (r-xxxx)
+#       pOrganizationId:
+#         default: The ID of the Organization (o-xxxxxxxxxx)
       pLogsRetentionInDays:
         default: The number of day to retain the CloudWatch logs for the Step Functions
       pEventBridgeTriggerHour:
@@ -133,20 +133,20 @@ Parameters:
     Default: iam-credential-report-generation-role
 
 
-  ## The root id of the organization, needed for the StackSet deployment
-  pOrganizationRootId:
-    Type: String
-    Description: The Root ID of the Organization (r-xxxx).
-#    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+#   ## The root id of the organization, needed for the StackSet deployment
+#   pOrganizationRootId:
+#     Type: String
+#     Description: The Root ID of the Organization (r-xxxx).
+# #    AllowedPattern: '^o-[a-z0-9]{10,32}$'
 
 
-  ## The organization id, needed to limit the scope of the assume role permission
-  pOrganizationId:
-    Type: String
-    Description: The Organization ID of the Payer Account (o-xxxxxxxxxx).
-    MinLength: 12
-    MaxLength: 12
-    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+#   ## The organization id, needed to limit the scope of the assume role permission
+#   pOrganizationId:
+#     Type: String
+#     Description: The Organization ID of the Payer Account (o-xxxxxxxxxx).
+#     MinLength: 12
+#     MaxLength: 12
+#     AllowedPattern: '^o-[a-z0-9]{10,32}$'
 
 
   ## The retention days for the CloudWatch logs group
@@ -247,7 +247,58 @@ Conditions:
 
 ###############################################################################
 Resources:
+  ###############################################
+  # Automatically pull Organization and Root ID
+  ###############################################
+  OrgIdCustomResource:
+    Type: Custom::GetOrgID
+    Properties:
+      ServiceToken: !GetAtt DescribeOrganizationLambdaFunction.Arn
 
+  DescribeOrganizationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                org_id_value = boto3.client("organizations").describe_organization()["Organization"]["Id"]
+                root_id_value = boto3.client("organizations").list_roots()["Roots"][0]["Id"]
+                responseData = {}
+                responseData['OrgID'] = org_id_value
+                responseData['RootID'] = root_id_value
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+              except Exception:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {}, "CustomResourcePhysicalID")
+
+      Handler: index.handler
+      Role: !GetAtt DescribeOrganizationRole.Arn
+      Runtime: python3.9
+
+  DescribeOrganizationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DescribeOrganizationLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - organizations:DescribeOrganization
+                  - organizations:ListRoots
+                Resource: "*"
   ## This is for a KMS key if we are creating a new key and s3 bucket
   ## the rule should prevent us from creating a key if we are not creating a
   ## bucket.
@@ -426,7 +477,7 @@ Resources:
             Resource: !Sub 'arn:aws:iam::*:role/${pIAMCredentialGenRoleName}'
             Condition:
               StringEquals:
-                "aws:PrincipalOrgID" : !Ref pOrganizationId
+                "aws:PrincipalOrgID" : !GetAtt OrgIdCustomResource.OrgID
         - Statement:
           - Sid: AllowKMS
             Effect: Allow
@@ -485,8 +536,7 @@ Resources:
             Resource: !Sub 'arn:aws:iam::*:role/${pIAMCredentialGenRoleName}'
             Condition:
               StringEquals:
-                "aws:PrincipalOrgID" : !Ref pOrganizationId
-
+                "aws:PrincipalOrgID" : !GetAtt OrgIdCustomResource.OrgID
 
 
   ## The state machine will handle the coordination of the lambda functions and
@@ -610,7 +660,7 @@ Resources:
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds:
-              - !Ref pOrganizationRootId
+              - !GetAtt OrgIdCustomResource.RootID
           Regions:
             - us-east-1
       Tags:
