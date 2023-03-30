@@ -51,8 +51,6 @@ The following details will need to be provided:
   - Parameter pKMSKeyArn [None]: None or the ARN of the KMS key.
   - Parameter pSNSSubEmail []: You can optionally provide an email address for the SNS topic to send account level errors.
   - Parameter pIAMCredentialGenRoleName [iam-credential-report-generation-role]: Provide a unique name for the role that the template creates in each member account.
-  - Parameter pOrganizationRootId []: Provide the Organization Root ID (r-xxxx). You can find the value in the management account in the [AWS Console](https://us-east-1.console.aws.amazon.com/organizations/v2/home/accounts).
-  - Parameter pOrganizationId []: Provide the Organization ID in the form of (o-xxxxxxxxxxxx). You can find the value in the management account in the [AWS Console](https://us-east-1.console.aws.amazon.com/organizations/v2/home/accounts).
   - Parameter pLogsRetentionInDays [90]: Provide the number of days to retain the Amazon CloudWatch log groups logs.
   - Parameter pEventBridgeTriggerHour []: Provide the two-digit hour (00-23) in UTC time used to trigger the EventBridge rule each day.
   - Parameter pTagKey1 [tagkey]: A Tag key to add to the resources.
